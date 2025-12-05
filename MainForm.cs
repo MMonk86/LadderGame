@@ -11,6 +11,7 @@ namespace LadderGame
         private ComboBox cboCount;
         private Button btnStart;
         private Button btnRandom;
+        private Button btnPlay;
         private Panel pnlLadder;
         private List<TextBox> topInputs = new List<TextBox>();
         private List<TextBox> bottomInputs = new List<TextBox>();
@@ -23,6 +24,13 @@ namespace LadderGame
         // Animation/Result state
         private int? highlightedPathIndex = null;
         private List<PointF> pathPoints = new List<PointF>();
+
+        // Animation logic
+        private Timer animTimer;
+        private bool isAnimating = false;
+        private int animPathIndex = 0;
+        private PointF currentAnimPos;
+        private float animSpeed = 5.0f; // Pixels per tick
 
         public MainForm()
         {
@@ -66,6 +74,16 @@ namespace LadderGame
             btnStart.Click += BtnStart_Click;
             this.Controls.Add(btnStart);
 
+            btnPlay = new Button();
+            btnPlay.Text = "Play";
+            btnPlay.Location = new Point(330, 10);
+            btnPlay.Click += BtnPlay_Click;
+            this.Controls.Add(btnPlay);
+
+            animTimer = new Timer();
+            animTimer.Interval = 20; // 50fps
+            animTimer.Tick += AnimTimer_Tick;
+
             pnlLadder = new Panel();
             pnlLadder.Location = new Point(20, 80);
             pnlLadder.Size = new Size(740, 400);
@@ -104,6 +122,8 @@ namespace LadderGame
             bridges.Clear();
             highlightedPathIndex = null;
             pathPoints.Clear();
+            isAnimating = false;
+            animTimer.Stop();
 
             // Dimensions
             int areaWidth = pnlLadder.Width;
@@ -143,9 +163,8 @@ namespace LadderGame
         private void GenerateLadder()
         {
             bridges.Clear();
-            // Generate random bridges
-            // For each column gap (0 to n-2), add random bridges
-            // We ensure bridges don't overlap too closely in Y
+            // Generate random bridges (Horizontal and Diagonal)
+            // A diagonal bridge connects Col[LeftY] to Col+1[RightY]
 
             int stepsPerGap = 3 + rng.Next(3); // Random density
 
@@ -154,16 +173,25 @@ namespace LadderGame
 
             for (int col = 0; col < participants - 1; col++)
             {
-                for (int k = 0; k < 4; k++) // Try to add a few bridges per column gap
+                int bridgesInCol = 4 + rng.Next(3);
+                for (int k = 0; k < bridgesInCol; k++)
                 {
-                    float y = (float)(0.1 + (rng.NextDouble() * 0.8)); // 10% to 90% height
+                    float leftY = (float)(0.1 + (rng.NextDouble() * 0.8));
 
-                    // Check if too close to existing bridge in same col, or neighbors
-                    // Note: In a real game, we need to be careful about overlapping bridges on adjacent columns at exact same Y.
-                    // For simplicity, we just add them and will sort/filter later or just draw carefully.
-                    // To prevent crossing overlaps: ensure Y's are distinct or have spacing.
+                    // 30% chance of being diagonal
+                    float rightY = leftY;
+                    if (rng.NextDouble() < 0.3)
+                    {
+                        // Slight slant: +/- 0.05 height
+                        float offset = (float)((rng.NextDouble() - 0.5) * 0.1);
+                        rightY = leftY + offset;
+                    }
 
-                    bridges.Add(new Bridge { ColIndex = col, YPercent = y });
+                    // Basic clamp
+                    if (rightY < 0.1f) rightY = 0.1f;
+                    if (rightY > 0.9f) rightY = 0.9f;
+
+                    bridges.Add(new Bridge { ColIndex = col, LeftYPercent = leftY, RightYPercent = rightY });
                 }
             }
 
@@ -196,6 +224,7 @@ namespace LadderGame
             // But let's regenerate ladder to make it "new".
             GenerateLadder();
             highlightedPathIndex = null;
+            pathPoints.Clear();
             pnlLadder.Invalidate();
         }
 
@@ -212,51 +241,64 @@ namespace LadderGame
             MessageBox.Show(results, "결과 확인");
         }
 
-        private string GetResultFor(int startCol)
+        private void BtnPlay_Click(object sender, EventArgs e)
         {
-            int currentCol = startCol;
-            float currentY = 0f;
+            if (isAnimating || participants < 2) return;
 
-            // Sort all bridges by Y
-            var sortedBridges = bridges.OrderBy(b => b.YPercent).ToList();
+            // Start from 1st participant (index 0) as requested ("Left Top Standard")
+            CalculatePath(0, false);
 
-            foreach (var bridge in sortedBridges)
+            isAnimating = true;
+            animPathIndex = 0;
+            if (pathPoints.Count > 0)
+                currentAnimPos = pathPoints[0];
+            animTimer.Start();
+        }
+
+        private void AnimTimer_Tick(object sender, EventArgs e)
+        {
+            if (!isAnimating || pathPoints.Count == 0)
             {
-                // Convert percent to actual Y (logic only, size independent)
-                // If this bridge is "below" our current virtual position (which moves down)
-                if (bridge.YPercent < currentY) continue;
-
-                // In a real traversal, we just go down the list of bridges.
-                // Since bridges are sorted by Y, we just process them in order.
-
-                if (bridge.ColIndex == currentCol)
-                {
-                    // Bridge to the right
-                    currentCol++;
-                }
-                else if (bridge.ColIndex == currentCol - 1)
-                {
-                    // Bridge to the left (coming from left column)
-                    currentCol--;
-                }
+                animTimer.Stop();
+                isAnimating = false;
+                pnlLadder.Invalidate();
+                return;
+            }
             }
             return bottomInputs[currentCol].Text;
         }
 
-        // Allow clicking the top area of the panel to trace path
-        private void PnlLadder_MouseClick(object sender, MouseEventArgs e)
-        {
-             // Determine which column was clicked
-            int colWidth = pnlLadder.Width / participants;
-            int clickedCol = e.X / colWidth;
-
-            if (clickedCol >= 0 && clickedCol < participants)
+            if (animPathIndex >= pathPoints.Count - 1)
             {
-                CalculatePath(clickedCol);
+                animTimer.Stop();
+                isAnimating = false;
+                pnlLadder.Invalidate();
+                // Show result
+                MessageBox.Show($"{topInputs[0].Text} -> {GetResultFor(0)}");
+                return;
             }
+
+            PointF target = pathPoints[animPathIndex + 1];
+            float dx = target.X - currentAnimPos.X;
+            float dy = target.Y - currentAnimPos.Y;
+            float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+
+            if (dist < animSpeed)
+            {
+                currentAnimPos = target;
+                animPathIndex++;
+            }
+            else
+            {
+                float moveX = (dx / dist) * animSpeed;
+                float moveY = (dy / dist) * animSpeed;
+                currentAnimPos = new PointF(currentAnimPos.X + moveX, currentAnimPos.Y + moveY);
+            }
+
+            pnlLadder.Invalidate();
         }
 
-        private void CalculatePath(int startCol)
+        private void CalculatePath(int startCol, bool showMessage = true)
         {
             highlightedPathIndex = startCol;
             pathPoints.Clear();
@@ -274,29 +316,73 @@ namespace LadderGame
             // Start Point
             pathPoints.Add(new PointF(GetColX(currentCol, colWidth), 0));
 
-            foreach (var bridge in sortedBridges)
+            while (currentY < 1.0f)
             {
-                // Convert percent to actual Y
-                float bridgeY = bridge.YPercent * height;
+                var nextLeftBridge = bridges
+                    .Where(b => b.ColIndex == currentCol && b.LeftYPercent > currentY + 0.001f)
+                    .OrderBy(b => b.LeftYPercent)
+                    .FirstOrDefault();
 
-                if (bridgeY < currentY) continue;
+                var nextRightBridge = bridges
+                    .Where(b => b.ColIndex == currentCol - 1 && b.RightYPercent > currentY + 0.001f)
+                    .OrderBy(b => b.RightYPercent)
+                    .FirstOrDefault();
 
-                // Add point down to this bridge level
-                pathPoints.Add(new PointF(GetColX(currentCol, colWidth), bridgeY));
-                currentY = bridgeY;
+                float nextY = 1.0f;
+                Bridge targetBridge = null;
+                bool goingRight = false;
 
-                // Check if this bridge affects us
-                if (bridge.ColIndex == currentCol)
+                if (nextLeftBridge != null && nextRightBridge != null)
                 {
-                    // Bridge to the right
-                    currentCol++;
-                    pathPoints.Add(new PointF(GetColX(currentCol, colWidth), bridgeY));
+                    if (nextLeftBridge.LeftYPercent < nextRightBridge.RightYPercent)
+                    {
+                        nextY = nextLeftBridge.LeftYPercent;
+                        targetBridge = nextLeftBridge;
+                        goingRight = true;
+                    }
+                    else
+                    {
+                        nextY = nextRightBridge.RightYPercent;
+                        targetBridge = nextRightBridge;
+                        goingRight = false;
+                    }
                 }
-                else if (bridge.ColIndex == currentCol - 1)
+                else if (nextLeftBridge != null)
                 {
-                    // Bridge to the left (coming from left column)
-                    currentCol--;
-                    pathPoints.Add(new PointF(GetColX(currentCol, colWidth), bridgeY));
+                    nextY = nextLeftBridge.LeftYPercent;
+                    targetBridge = nextLeftBridge;
+                    goingRight = true;
+                }
+                else if (nextRightBridge != null)
+                {
+                    nextY = nextRightBridge.RightYPercent;
+                    targetBridge = nextRightBridge;
+                    goingRight = false;
+                }
+
+                // Add segment going down to bridge or bottom
+                pathPoints.Add(new PointF(GetColX(currentCol, colWidth), nextY * height));
+                currentY = nextY;
+
+                if (currentY >= 1.0f) break;
+
+                // Traverse the bridge
+                if (targetBridge != null)
+                {
+                    if (goingRight)
+                    {
+                        // From Left to Right
+                        currentCol++;
+                        currentY = targetBridge.RightYPercent;
+                        pathPoints.Add(new PointF(GetColX(currentCol, colWidth), currentY * height));
+                    }
+                    else
+                    {
+                        // From Right to Left
+                        currentCol--;
+                        currentY = targetBridge.LeftYPercent;
+                        pathPoints.Add(new PointF(GetColX(currentCol, colWidth), currentY * height));
+                    }
                 }
             }
 
@@ -305,10 +391,95 @@ namespace LadderGame
 
             pnlLadder.Invalidate();
 
-            // Show result
-            string startName = topInputs[startCol].Text;
-            string result = bottomInputs[currentCol].Text;
-            MessageBox.Show($"{startName} -> {result}");
+            if (showMessage)
+            {
+                string startName = topInputs[startCol].Text;
+                string result = bottomInputs[currentCol].Text;
+                MessageBox.Show($"{startName} -> {result}");
+            }
+        }
+
+        private string GetResultFor(int startCol)
+        {
+            int currentCol = startCol;
+            float currentY = 0f;
+
+            while (currentY < 1.0f)
+            {
+                var nextLeftBridge = bridges
+                    .Where(b => b.ColIndex == currentCol && b.LeftYPercent > currentY + 0.001f)
+                    .OrderBy(b => b.LeftYPercent)
+                    .FirstOrDefault();
+
+                var nextRightBridge = bridges
+                    .Where(b => b.ColIndex == currentCol - 1 && b.RightYPercent > currentY + 0.001f)
+                    .OrderBy(b => b.RightYPercent)
+                    .FirstOrDefault();
+
+                Bridge targetBridge = null;
+                bool goingRight = false;
+                float nextY = 1.0f;
+
+                if (nextLeftBridge != null && nextRightBridge != null)
+                {
+                    if (nextLeftBridge.LeftYPercent < nextRightBridge.RightYPercent)
+                    {
+                        nextY = nextLeftBridge.LeftYPercent;
+                        targetBridge = nextLeftBridge;
+                        goingRight = true;
+                    }
+                    else
+                    {
+                        nextY = nextRightBridge.RightYPercent;
+                        targetBridge = nextRightBridge;
+                        goingRight = false;
+                    }
+                }
+                else if (nextLeftBridge != null)
+                {
+                    nextY = nextLeftBridge.LeftYPercent;
+                    targetBridge = nextLeftBridge;
+                    goingRight = true;
+                }
+                else if (nextRightBridge != null)
+                {
+                    nextY = nextRightBridge.RightYPercent;
+                    targetBridge = nextRightBridge;
+                    goingRight = false;
+                }
+
+                currentY = nextY;
+                if (currentY >= 1.0f) break;
+
+                if (targetBridge != null)
+                {
+                    if (goingRight)
+                    {
+                        currentCol++;
+                        currentY = targetBridge.RightYPercent;
+                    }
+                    else
+                    {
+                        currentCol--;
+                        currentY = targetBridge.LeftYPercent;
+                    }
+                }
+            }
+            return bottomInputs[currentCol].Text;
+        }
+
+        private void PnlLadder_MouseClick(object sender, MouseEventArgs e)
+        {
+            if (isAnimating) return;
+
+             // Determine which column was clicked
+            int colWidth = pnlLadder.Width / participants;
+            int clickedCol = e.X / colWidth;
+
+            if (clickedCol >= 0 && clickedCol < participants)
+            {
+                CalculatePath(clickedCol, true);
+            }
         }
 
         private float GetColX(int colIndex, int colWidth)
@@ -341,14 +512,22 @@ namespace LadderGame
             {
                 float x1 = GetColX(bridge.ColIndex, colWidth);
                 float x2 = GetColX(bridge.ColIndex + 1, colWidth);
-                float y = bridge.YPercent * height;
-                g.DrawLine(linePen, x1, y, x2, y);
+                float y1 = bridge.LeftYPercent * height;
+                float y2 = bridge.RightYPercent * height;
+                g.DrawLine(linePen, x1, y1, x2, y2);
             }
 
             // Draw Highlighted Path
-            if (pathPoints.Count > 1)
+            if (!isAnimating && pathPoints.Count > 1)
             {
                 g.DrawLines(pathPen, pathPoints.ToArray());
+            }
+
+            // Draw Animation Object
+            if (isAnimating)
+            {
+                float r = 10;
+                g.FillEllipse(Brushes.Blue, currentAnimPos.X - r, currentAnimPos.Y - r, r * 2, r * 2);
             }
         }
     }
@@ -356,6 +535,7 @@ namespace LadderGame
     public class Bridge
     {
         public int ColIndex; // The bridge connects ColIndex and ColIndex + 1
-        public float YPercent; // Vertical position (0.0 to 1.0)
+        public float LeftYPercent;
+        public float RightYPercent;
     }
 }
